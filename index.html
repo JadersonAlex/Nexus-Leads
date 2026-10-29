@@ -475,7 +475,8 @@ body.locked{ overflow:hidden; }
   <div class="sidebar-footer">
     <div class="acct"><div class="acct-ava" id="acctAva">?</div><div class="acct-info"><div class="acct-mail" id="acctMail"></div><div class="acct-role">Conectado</div></div></div>
     <div class="acct-links"><button class="link-btn" id="btnPass" type="button">Alterar senha</button><button class="link-btn" id="btnUsers" type="button">Acessos</button><button class="link-btn" id="btnLogout" type="button">Sair</button></div>
-    <div class="sidebar-tagline">Seus dados ficam salvos neste navegador. Faça um backup de vez em quando.</div>
+    <div class="sidebar-tagline">Seus leads e alterações ficam salvos automaticamente neste navegador. Baixe o backup para guardar uma cópia ou levar para outro computador.</div>
+    <div class="sidebar-tagline" id="bkInfo"></div>
     <button class="link-btn" id="btnBackup">Baixar backup (.json)</button>
     <button class="link-btn" id="btnRestore">Restaurar backup</button>
     <input type="file" id="fileRestore" accept="application/json,.json" hidden>
@@ -798,6 +799,17 @@ body.locked{ overflow:hidden; }
   </div>
 </div>
 
+<div class="modal-backdrop" id="mRestore" role="dialog" aria-modal="true" aria-labelledby="rsTitle">
+  <div class="modal" style="max-width:440px">
+    <div class="modal-head"><div><div class="modal-title" id="rsTitle">Restaurar backup</div><div class="modal-sub" id="rsText"></div></div></div>
+    <div class="modal-actions" style="flex-wrap:wrap">
+      <button class="btn btn-ghost" id="rsNo" type="button">Cancelar</button>
+      <button class="btn btn-ghost" id="rsMerge" type="button">Somar aos atuais</button>
+      <button class="btn btn-danger" id="rsReplace" type="button">Substituir tudo</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -830,7 +842,20 @@ function load(){
     if(raw){ const o = JSON.parse(raw); if(o && Array.isArray(o.leads) && Array.isArray(o.deals)) db = normDb(o); }
   }catch(e){}
 }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(db)); }catch(e){} }
+const BK_KEY = 'nexus_backup_meta_v1';
+let bkMeta = { last:0, changes:0 };
+try{ const m = JSON.parse(localStorage.getItem(BK_KEY)); if(m) bkMeta = { last:+m.last||0, changes:+m.changes||0 }; }catch(e){}
+function saveBkMeta(){ try{ localStorage.setItem(BK_KEY, JSON.stringify(bkMeta)); }catch(e){} }
+let saveWarned = false;
+function save(){
+  try{ localStorage.setItem(KEY, JSON.stringify(db)); saveWarned = false; }
+  catch(e){
+    if(!saveWarned){ saveWarned = true; toast('Não foi possível salvar neste navegador (armazenamento cheio ou bloqueado). Baixe um backup agora.', 'warn'); }
+  }
+  bkMeta.changes += 1; saveBkMeta();
+  if(typeof renderBkInfo === 'function') renderBkInfo();
+}
+try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
 /* ============================================================
@@ -1230,8 +1255,34 @@ $('#sbBackdrop').addEventListener('click', closeSidebar);
 /* ============================================================
    BACKUP
    ============================================================ */
-$('#btnBackup').addEventListener('click', async () => { if(await saveFile('nexus-leads-backup.json', JSON.stringify(db, null, 2), 'application/json')) toast('Backup baixado'); });
+function renderBkInfo(){
+  const el = $('#bkInfo'); if(!el) return;
+  const n = bkMeta.changes;
+  el.textContent = bkMeta.last
+    ? `Último backup: ${new Date(bkMeta.last).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'})}` + (n ? ` · ${n} ${n === 1 ? 'alteração' : 'alterações'} desde então` : ' · tudo em dia')
+    : 'Você ainda não baixou nenhum backup.';
+  el.style.color = (!bkMeta.last || n >= 20) ? '#fcd67a' : '';
+}
+function bkStamp(){ const d = new Date(), p = x => String(x).padStart(2,'0'); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`; }
+$('#btnBackup').addEventListener('click', async () => {
+  const pacote = Object.assign({ app:'nexus-insight-leads', versao:1, exportadoEm:new Date().toISOString() }, db);
+  if(await saveFile(`nexus-leads-backup_${bkStamp()}.json`, JSON.stringify(pacote, null, 2), 'application/json')){
+    bkMeta = { last:Date.now(), changes:0 }; saveBkMeta(); renderBkInfo(); toast(`Backup baixado (${db.leads.length} leads, ${db.deals.length} negócios)`);
+  }
+});
 $('#btnRestore').addEventListener('click', () => $('#fileRestore').click());
+let pendingBk = null;
+function mergeDb(o){
+  const inc = normDb(o);
+  const haveL = new Set(db.leads.map(l => l.id)), haveD = new Set(db.deals.map(d => d.id)), haveS = new Set(db.stages.map(x => x.id));
+  let nl = 0, nd = 0;
+  inc.leads.forEach(l => { if(l && l.id && !haveL.has(l.id)){ db.leads.push(l); nl++; } });
+  inc.deals.forEach(d => { if(d && d.id && !haveD.has(d.id)){ db.deals.push(d); nd++; } });
+  inc.stages.forEach(x => { if(!haveS.has(x.id)) db.stages.push(x); });
+  db.seq = Math.max(db.seq || 0, inc.seq || 0, ...db.leads.map(l => l.n || 0));
+  if(!db.empresa.nome && inc.empresa.nome) db.empresa = inc.empresa;
+  return { nl, nd };
+}
 $('#fileRestore').addEventListener('change', e => {
   const f = e.target.files[0]; if(!f) return;
   const r = new FileReader();
@@ -1239,13 +1290,23 @@ $('#fileRestore').addEventListener('change', e => {
     try{
       const o = JSON.parse(r.result);
       if(!o || !Array.isArray(o.leads) || !Array.isArray(o.deals)) throw 0;
-      askConfirm('Restaurar este backup?', `Isso substitui os dados atuais por ${o.leads.length} leads e ${o.deals.length} negócios do arquivo.`, 'Restaurar', () => {
-        db = normDb(o); save(); clearFilters(true); renderAll(); toast('Backup restaurado');
-      });
+      pendingBk = o;
+      $('#rsText').textContent = `O arquivo tem ${o.leads.length} leads e ${o.deals.length} negócios. "Substituir tudo" troca os dados atuais pelos do arquivo; "Somar aos atuais" mantém o que você já tem e acrescenta só o que está faltando.`;
+      openModal('mRestore');
     }catch(err){ toast('Arquivo inválido: use um backup .json do Nexus Insight Leads.', 'warn'); }
     e.target.value = '';
   };
   r.readAsText(f);
+});
+$('#rsNo').addEventListener('click', () => { pendingBk = null; $('#mRestore').classList.remove('show'); });
+$('#rsReplace').addEventListener('click', () => {
+  if(!pendingBk) return; const o = pendingBk; pendingBk = null; $('#mRestore').classList.remove('show');
+  db = normDb(o); save(); bkMeta.changes = 0; saveBkMeta(); renderBkInfo(); clearFilters(true); renderAll(); toast(`Backup restaurado: ${db.leads.length} leads`);
+});
+$('#rsMerge').addEventListener('click', () => {
+  if(!pendingBk) return; const o = pendingBk; pendingBk = null; $('#mRestore').classList.remove('show');
+  const { nl, nd } = mergeDb(o); save(); clearFilters(true); renderAll();
+  toast(nl || nd ? `Somados ${nl} leads e ${nd} negócios` : 'Nada novo no arquivo: seus dados já estavam aqui');
 });
 
 /* ============================================================
@@ -2121,7 +2182,12 @@ $('#sbLogo').src = LOGO; $('#authLogo').src = LOGO;
 
 const AUTH_KEY = 'nexus_auth_v1', SESS_KEY = 'nexus_sess_v1', LOCK_KEY = 'nexus_lock_v1', PBK_IT = 200000;
 /* conta inicial: só o hash da senha fica no código, nunca a senha em texto */
-const SEED_USER = { email:'jadersonalex@gmail.com', salt:'oeH03WcapbDaC2JKdd4yHw==', hash:'CWNdH1bOAScrpfA8Iz7gc5st5mfMS6yEmTrY1db3k8w=', it:200000 };
+const SEED_USERS = [
+   { email:'jadersonalex@gmail.com', salt:'oeH03WcapbDaC2JKdd4yHw==', hash:'CWNdH1bOAScrpfA8Iz7gc5st5mfMS6yEmTrY1db3k8w=', it:200000 },
+  { email:'comercialdiegodasilva@gmail.com', salt:'bAcFCe9sk6rZzIec4g4DTw==', hash:'y0M4zPvjKKyxEfP0qTZBukhuZdNe+b3euzFv80VMoAQ=', it:200000 }
+];
+const SEED_USER = SEED_USERS[0];
+const SEED_RM_KEY = 'nexus_seed_removed_v1';
 let authDb = { users:[] }, authUser = null, lockState = { n:0, until:0 };
 
 const b64 = u8 => btoa(String.fromCharCode(...u8));
@@ -2144,7 +2210,10 @@ function pwdCheck(p){
 function saveAuth(){ try{ localStorage.setItem(AUTH_KEY, JSON.stringify(authDb)); }catch(e){} }
 function loadAuth(){
   try{ const o = JSON.parse(localStorage.getItem(AUTH_KEY)); if(o && Array.isArray(o.users) && o.users.length) authDb = o; }catch(e){}
-  if(!authDb.users.length){ authDb = { users:[{ ...SEED_USER, criado:Date.now() }] }; saveAuth(); }
+  let rmSeed = []; try{ rmSeed = JSON.parse(localStorage.getItem(SEED_RM_KEY)) || []; }catch(e){}
+  let changed = false;
+  SEED_USERS.forEach(su => { if(!rmSeed.includes(su.email) && !authDb.users.some(u => u.email === su.email)){ authDb.users.push({ ...su, criado:Date.now() }); changed = true; } });
+  if(changed) saveAuth();
   try{ const l = JSON.parse(localStorage.getItem(LOCK_KEY)); if(l) lockState = l; }catch(e){}
 }
 function getSession(){
@@ -2260,7 +2329,7 @@ $('#usrList').addEventListener('click', e => {
   const email = b.closest('.usr-item').dataset.e;
   if(authDb.users.length <= 1){ toast('Mantenha ao menos um acesso.', 'warn'); return; }
   closeModals();
-  askConfirm(`Remover o acesso de ${email}?`, 'Essa pessoa não poderá mais entrar na plataforma.', 'Remover', () => { authDb.users = authDb.users.filter(u => u.email !== email); saveAuth(); toast('Acesso removido'); });
+  askConfirm(`Remover o acesso de ${email}?`, 'Essa pessoa não poderá mais entrar na plataforma.', 'Remover', () => { authDb.users = authDb.users.filter(u => u.email !== email); saveAuth(); if(SEED_USERS.some(su => su.email === email)){ try{ const r = JSON.parse(localStorage.getItem(SEED_RM_KEY)) || []; r.push(email); localStorage.setItem(SEED_RM_KEY, JSON.stringify(r)); }catch(e){} } toast('Acesso removido'); });
 });
 $('#uAdd').addEventListener('click', async () => {
   const email = $('#uEmail').value.trim().toLowerCase(), pass = $('#uPass').value;
@@ -2282,6 +2351,7 @@ fillUfSelect($('#fUf'), 'Selecione');
 fillUfSelect($('#eUf'), 'Selecione');
 load();
 renderAll();
+renderBkInfo();
 showView('leads');
 initAuth();
 </script>
