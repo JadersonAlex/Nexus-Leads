@@ -8,10 +8,7 @@ O Nexus-Leads é uma aplicação desenvolvida para facilitar a organização e o
 
 - Cadastro e gerenciamento de leads e negócios.
 - Registro de notas e acompanhamento de etapas comerciais.
-- Salvamento automático dos dados no navegador.
 - Exportação e restauração de backups em formato JSON.
-- Opções para substituir ou mesclar dados durante a restauração.
-- Indicador de status do backup e alertas em caso de falha no salvamento.
 
 ## 💾 Armazenamento de dados
 
